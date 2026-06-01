@@ -108,6 +108,7 @@ csr_envelope <- function(ref_points, n_eval, r_values, cube_bounds, n_sims = 19,
   set.seed(seed)
   K_sims <- matrix(NA_real_, nrow = n_sims, ncol = length(r_values))
   L_sims <- matrix(NA_real_, nrow = n_sims, ncol = length(r_values))
+  H_sims <- matrix(NA_real_, nrow = n_sims, ncol = length(r_values))
   
   precomputed_vols <- numeric(length(r_values))
   for (ri in seq_along(r_values)) {
@@ -123,6 +124,7 @@ csr_envelope <- function(ref_points, n_eval, r_values, cube_bounds, n_sims = 19,
     res <- bivariate_k_3d(ref_points, sim_eval, r_values, cube_bounds, precomputed_vols = precomputed_vols)
     K_sims[s, ] <- res$K
     L_sims[s, ] <- res$L
+    H_sims[s, ] <- res$H
   }
   
   lo <- (1 - conf) / 2; hi <- 1 - lo
@@ -133,10 +135,104 @@ csr_envelope <- function(ref_points, n_eval, r_values, cube_bounds, n_sims = 19,
     K_mean = colMeans(K_sims, na.rm = TRUE),
     L_low  = apply(L_sims, 2, quantile, probs = lo, na.rm = TRUE),
     L_high = apply(L_sims, 2, quantile, probs = hi, na.rm = TRUE),
-    L_mean = colMeans(L_sims, na.rm = TRUE)
+    L_mean = colMeans(L_sims, na.rm = TRUE),
+    H_low  = apply(L_sims, 2, quantile, probs = lo, na.rm = TRUE),
+    H_high = apply(L_sims, 2, quantile, probs = hi, na.rm = TRUE),
+    H_mean = colMeans(L_sims, na.rm = TRUE),
+    
+    K_sims = K_sims,
+    L_sims = L_sims,
+    H_sims = H_sims
   )
 }
 
+global_rank_envelope <- function(res, env, alpha = 0.05) {
+  rank_envelope_test <- function(Tlist, alpha = 0.05) {
+    s_plus_1 <- length(Tlist)
+    s <- s_plus_1 - 1
+    m <- length(Tlist[[1]])
+    
+    R_lower <- matrix(NA_real_, nrow = s_plus_1, ncol = m)
+    R_upper <- matrix(NA_real_, nrow = s_plus_1, ncol = m)
+    
+    for (j in seq_len(m)) {
+      vals <- sapply(Tlist, function(x) x[j])
+      R_lower[, j] <- rank(vals, ties.method = "average")
+      R_upper[, j] <- rank(-vals, ties.method = "average")
+    }
+    
+    R_star <- pmin(R_lower, R_upper)
+    
+    R_extreme <- apply(R_star, 1, min)
+    
+    R1 <- R_extreme[1]
+    p_minus <- sum(R_extreme < R1) / (s + 1)
+    p_plus  <- sum(R_extreme <= R1) / (s + 1)
+    
+    a_k <- sapply(1:max(R_extreme), function(k) sum(R_extreme < k) / (s + 1))
+    k_alpha <- max(which(a_k < alpha))
+    
+    Tmat <- do.call(rbind, Tlist)
+    
+    T_low <- apply(Tmat, 2, function(col) sort(col)[k_alpha])
+    T_upp <- apply(Tmat, 2, function(col) sort(col, decreasing = TRUE)[k_alpha])
+    
+    T1 <- Tlist[[1]]
+    outside <- any(T1 < T_low | T1 > T_upp)
+    
+    decision <- if (p_plus <= alpha) {
+      "Reject H0"
+    } else if (p_minus > alpha) {
+      "Do not reject H0"
+    } else {
+      "Borderline (touching envelope)"
+    }
+    
+    list(
+      p_interval = c(p_minus = p_minus, p_plus = p_plus),
+      k_alpha = k_alpha,
+      envelope = list(lower = T_low, upper = T_upp),
+      R_extreme = R_extreme,
+      decision = decision
+    )
+  }
+
+  mat_to_list <- function(mat) split(mat, row(mat))
+
+  Tlist_K <- c(list(res$K), mat_to_list(env$K_sims))
+  Tlist_L <- c(list(res$L), mat_to_list(env$L_sims))
+  Tlist_H <- c(list(res$H), mat_to_list(env$H_sims))
+
+  out_K <- rank_envelope_test(Tlist_K, alpha)
+  out_L <- rank_envelope_test(Tlist_L, alpha)
+  out_H <- rank_envelope_test(Tlist_H, alpha)
+
+  list(
+    alpha = alpha,
+    r = env$r,
+    
+    K = list(
+      p_interval = out_K$p_interval,
+      decision   = out_K$decision,
+      envelope   = out_K$envelope,
+      R_extreme  = out_K$R_extreme
+    ),
+    
+    L = list(
+      p_interval = out_L$p_interval,
+      decision   = out_L$decision,
+      envelope   = out_L$envelope,
+      R_extreme  = out_L$R_extreme
+    ),
+    
+    H = list(
+      p_interval = out_H$p_interval,
+      decision   = out_H$decision,
+      envelope   = out_H$envelope,
+      R_extreme  = out_H$R_extreme
+    )
+  )
+}
 
 plot_bivariate_k <- function(result, envelope = NULL, type = "L", ...) {
   r <- result$r
@@ -147,8 +243,8 @@ plot_bivariate_k <- function(result, envelope = NULL, type = "L", ...) {
   )
   y0 <- switch(type,
                K = (4 * pi * r^3 / 3),
-               L = r,            # CSR reference for uncentered L is r
-               H = rep(0, length(r))  # CSR reference for centered H is 0
+               L = r,
+               H = rep(0, length(r))
   )
   
   y_all <- c(y, y0)
